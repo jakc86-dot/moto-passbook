@@ -3,9 +3,12 @@ node_modules/
 .expo
 .expo/*
 .eas/
+android/
 dist/
 work/
 outputs/
+tools/
+secrets/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

@@ -10,6 +10,7 @@ function Find-JavaHome {
     $candidates += $env:JAVA_HOME
   }
   $candidates += @(
+    (Join-Path (Get-ProjectRoot) "tools\jdk17"),
     "$env:ProgramFiles\Android\Android Studio\jbr",
     "$env:ProgramFiles\Android\Android Studio\jre",
     "$env:ProgramFiles\Eclipse Adoptium",
@@ -108,7 +109,7 @@ function Ensure-AndroidSigningPatch {
 
   $text = Get-Content $gradleFile -Raw
 
-  if ($text -notmatch "uploadSigningProperties") {
+  if ($text -notmatch "def\s+uploadSigningProperties\s*=") {
     $projectRootLine = 'def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()'
     $insert = @'
 def uploadSigningProperties = new Properties()
@@ -118,7 +119,7 @@ if (uploadSigningPropertiesFile.exists()) {
 }
 
 '@
-    $text = $text.Replace($projectRootLine + "`r`n", $projectRootLine + "`r`n`r`n" + $insert)
+    $text = $text -replace [regex]::Escape($projectRootLine), ($projectRootLine + "`r`n`r`n" + $insert)
   }
 
   if ($text -notmatch "signingConfigs\.release") {
@@ -132,10 +133,10 @@ if (uploadSigningPropertiesFile.exists()) {
         }
 '@
     $text = $text -replace "(?s)(signingConfigs\s*\{\s*debug\s*\{.*?\n\s*\}\r?\n)(\s*\})", "`$1$releaseConfig`r`n`$2"
-    $text = $text.Replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
+    $text = $text -replace "(?s)(release\s*\{.*?)(signingConfig signingConfigs\.debug)", "`$1signingConfig signingConfigs.release"
   }
 
-  Set-Content -Path $gradleFile -Value $text -Encoding UTF8
+  [IO.File]::WriteAllText($gradleFile, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Test-UploadSigningFiles {
@@ -143,6 +144,16 @@ function Test-UploadSigningFiles {
 
   $keystore = Join-Path $ProjectRoot "android\app\keystores\upload-key.jks"
   $properties = Join-Path $ProjectRoot "android\local-signing.properties"
+  $sourceKeystore = Join-Path $ProjectRoot "secrets\android\upload-key.jks"
+  $sourceProperties = Join-Path $ProjectRoot "secrets\android\local-signing.properties"
+
+  if ((-not (Test-Path $keystore) -or -not (Test-Path $properties)) -and
+      (Test-Path $sourceKeystore) -and (Test-Path $sourceProperties)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $keystore -Parent) | Out-Null
+    Copy-Item -LiteralPath $sourceKeystore -Destination $keystore -Force
+    Copy-Item -LiteralPath $sourceProperties -Destination $properties -Force
+  }
+
   if (-not (Test-Path $keystore) -or -not (Test-Path $properties)) {
     throw "Upload keystore is missing. Run 'Generate Android Upload Keystore.cmd' first."
   }
