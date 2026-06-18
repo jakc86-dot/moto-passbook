@@ -217,6 +217,7 @@ const STORAGE_KEY = "moto-passbook-data-v1";
 const HANDOVER_STORAGE_PREFIX = "moto-passbook-handover-code-";
 const REMINDER_INTERVAL_DAYS = 30;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const COLLAPSED_LIST_LIMIT = 5;
 const VPIC_BASE_URL = "https://vpic.nhtsa.dot.gov/api/vehicles";
 const APP_HANDOVER_API_URL = "";
 const APP_HANDOVER_API_KEY = "";
@@ -1904,14 +1905,6 @@ const makeThemeStyles = (themeMode: ThemeMode, textSizeMode: TextSizeMode) => {
       color: isDark ? "#D8E7F5" : colors.navy,
       fontSize: 13 * scale
     },
-    alertDeleteButton: {
-      backgroundColor: isDark ? "#3B2524" : "#FCEAE7",
-      borderColor: isDark ? "#75463F" : "#E2B0A7"
-    },
-    alertDeleteButtonText: {
-      color: isDark ? "#FFB6AA" : colors.red,
-      fontSize: 13 * scale
-    },
     statusPill: {
       backgroundColor: isDark ? "#243244" : "#EEF3F7",
       color: isDark ? "#D8E7F5" : colors.navy,
@@ -2401,22 +2394,6 @@ export default function App() {
     });
   };
 
-  const dismissAlert = (alert: MaintenanceAlert) => {
-    const dismissKey = maintenanceAlertDismissKey(alert);
-    confirmAction(
-      "주의 항목 숨기기",
-      `${alert.title} 알림만 홈에서 숨길까요? 정비주기는 정비 탭에 그대로 남습니다.`,
-      "숨기기",
-      "primary",
-      () => {
-        setData((current) => ({
-          ...current,
-          dismissedAlertKeys: Array.from(new Set([...(current.dismissedAlertKeys ?? []), dismissKey]))
-        }));
-      }
-    );
-  };
-
   const resetModelSchedules = () => {
     if (!activeBike) return;
     confirmAction(
@@ -2765,7 +2742,6 @@ export default function App() {
             alerts={alerts}
             onAddMaintenance={openMaintenanceModal}
             onAddFuel={openFuelModal}
-            onDismissAlert={dismissAlert}
             themeStyles={themeStyles}
           />
         )}
@@ -3367,7 +3343,6 @@ function OverviewScreen({
   alerts,
   onAddMaintenance,
   onAddFuel,
-  onDismissAlert,
   themeStyles
 }: {
   data: AppData;
@@ -3375,7 +3350,6 @@ function OverviewScreen({
   alerts: MaintenanceAlert[];
   onAddMaintenance: (template?: Pick<ScheduleItem, "title" | "category" | "memo"> | null) => void;
   onAddFuel: () => void;
-  onDismissAlert: (alert: MaintenanceAlert) => void;
   themeStyles: ThemeStyles;
 }) {
   const totalMaintenance = data.maintenanceRecords.reduce((sum, record) => sum + record.costKrw, 0);
@@ -3439,7 +3413,6 @@ function OverviewScreen({
                 key={alert.id}
                 alert={alert}
                 onRecordMaintenance={() => onAddMaintenance(alert)}
-                onDeleteAlert={() => onDismissAlert(alert)}
                 onFindShop={() => setShopFinderAlert(alert)}
                 themeStyles={themeStyles}
               />
@@ -3486,10 +3459,12 @@ function OverviewScreen({
         <View style={styles.sectionBlock}>
           <Text style={[styles.sectionTitle, themeStyles.sectionTitle]}>최근 정비</Text>
           <RecordCard
-            title={`${recentMaintenance.title} ${formatKm(recentMaintenance.odometerKm)} · ${recentMaintenance.shop} · ${formatKrw(recentMaintenance.costKrw)}`}
+            title={recentMaintenance.title}
             subtitle={recentMaintenance.date}
+            odometerText={formatKm(recentMaintenance.odometerKm)}
+            shop={recentMaintenance.shop}
             detail={recentMaintenance.memo}
-            amount=""
+            amount={formatKrw(recentMaintenance.costKrw)}
             themeStyles={themeStyles}
           />
         </View>
@@ -3532,17 +3507,15 @@ function MetricCard({
 function AlertCard({
   alert,
   onRecordMaintenance,
-  onDeleteAlert,
   onFindShop,
   themeStyles
 }: {
   alert: MaintenanceAlert;
   onRecordMaintenance?: () => void;
-  onDeleteAlert?: () => void;
   onFindShop?: () => void;
   themeStyles: ThemeStyles;
 }) {
-  const label = "기록";
+  const label = "정비기록";
   const dueText =
     alert.dueInKm <= 0 ? `${formatKm(Math.abs(alert.dueInKm))} 지남` : `${formatKm(alert.dueInKm)} 남음`;
   const lastServiceText = alert.lastServiceKm ? `마지막 정비 ${formatKm(alert.lastServiceKm)}` : "정비 기록 없음";
@@ -3550,61 +3523,50 @@ function AlertCard({
 
   return (
     <View style={[styles.alertCard, themeStyles.alertCard]}>
-      <View style={styles.alertTitleRow}>
-        <View style={styles.alertTextBlock}>
-          <Text style={[styles.cardTitle, themeStyles.cardTitle, styles.alertTitleText]}>
-            {alert.title} <Text style={[styles.alertDue, themeStyles.alertDue]}>{dueText}</Text>
-          </Text>
-          {referenceText ? (
-            <Text style={[styles.cardDetail, themeStyles.cardDetail, styles.alertReferenceText]}>{referenceText}</Text>
-          ) : null}
+      <View style={styles.alertTextBlock}>
+        <Text style={[styles.cardTitle, themeStyles.cardTitle, styles.alertTitleText]}>{alert.title}</Text>
+        <View style={styles.alertMetaRow}>
+          <Text style={[styles.alertDue, themeStyles.alertDue, styles.alertMetaDueText]}>{dueText}</Text>
+          <Text style={[styles.cardDetail, themeStyles.cardDetail, styles.alertServiceText]}>{lastServiceText}</Text>
         </View>
-        <View style={styles.alertActionRow}>
-          {onDeleteAlert ? (
-            <Pressable
-              accessibilityLabel={`${alert.title} 삭제`}
-              accessibilityRole="button"
-              style={[styles.alertDeleteButton, themeStyles.alertDeleteButton]}
-              onPress={onDeleteAlert}
-            >
-              <Text style={[styles.alertDeleteButtonText, themeStyles.alertDeleteButtonText]}>삭제</Text>
-            </Pressable>
-          ) : null}
-          <Pressable
-            accessibilityLabel={`${alert.title} 정비 기록 추가`}
-            accessibilityRole="button"
-            style={[
-              styles.alertStatusButton,
-              themeStyles.alertStatusButton,
-              alert.status === "overdue" && styles.statusOverdueButton,
-              alert.status === "soon" && styles.statusSoonButton
-            ]}
-            onPress={onRecordMaintenance}
-          >
-            <Text
-              style={[
-                styles.alertStatusText,
-                themeStyles.alertStatusText,
-                alert.status === "overdue" && styles.statusOverdueText,
-                alert.status === "soon" && styles.statusSoonText
-              ]}
-            >
-              {label}
-            </Text>
-          </Pressable>
-          {onFindShop ? (
-            <Pressable
-              accessibilityLabel={`${alert.title} 정비소 찾기`}
-              accessibilityRole="button"
-              style={[styles.findShopButton, themeStyles.findShopButton]}
-              onPress={onFindShop}
-            >
-              <Text style={[styles.findShopButtonText, themeStyles.findShopButtonText]}>정비소 찾기</Text>
-            </Pressable>
-          ) : null}
-        </View>
+        {referenceText ? (
+          <Text style={[styles.cardDetail, themeStyles.cardDetail, styles.alertReferenceText]}>{referenceText}</Text>
+        ) : null}
       </View>
-      <Text style={[styles.cardDetail, themeStyles.cardDetail, styles.alertServiceText]}>{lastServiceText}</Text>
+      <View style={styles.alertActionRow}>
+        <Pressable
+          accessibilityLabel={`${alert.title} 정비 기록 추가`}
+          accessibilityRole="button"
+          style={[
+            styles.alertStatusButton,
+            themeStyles.alertStatusButton,
+            alert.status === "overdue" && styles.statusOverdueButton,
+            alert.status === "soon" && styles.statusSoonButton
+          ]}
+          onPress={onRecordMaintenance}
+        >
+          <Text
+            style={[
+              styles.alertStatusText,
+              themeStyles.alertStatusText,
+              alert.status === "overdue" && styles.statusOverdueText,
+              alert.status === "soon" && styles.statusSoonText
+            ]}
+          >
+            {label}
+          </Text>
+        </Pressable>
+        {onFindShop ? (
+          <Pressable
+            accessibilityLabel={`${alert.title} 정비소 찾기`}
+            accessibilityRole="button"
+            style={[styles.findShopButton, themeStyles.findShopButton]}
+            onPress={onFindShop}
+          >
+            <Text style={[styles.findShopButtonText, themeStyles.findShopButtonText]}>정비소 찾기</Text>
+          </Pressable>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -3633,6 +3595,11 @@ function MaintenanceScreen({
   themeStyles: ThemeStyles;
 }) {
   const scheduleSource = scheduleSourceForBike(bike);
+  const [showAllMaintenanceRecords, setShowAllMaintenanceRecords] = useState(false);
+  const hasMoreMaintenanceRecords = maintenanceRecords.length > COLLAPSED_LIST_LIMIT;
+  const visibleMaintenanceRecords = showAllMaintenanceRecords
+    ? maintenanceRecords
+    : maintenanceRecords.slice(0, COLLAPSED_LIST_LIMIT);
 
   return (
     <View style={styles.screenBlock}>
@@ -3641,13 +3608,26 @@ function MaintenanceScreen({
           <View>
             <Text style={[styles.sectionTitle, themeStyles.sectionTitle]}>기록장</Text>
           </View>
-          <Pressable style={styles.iconButtonDark} onPress={onAddMaintenance}>
-            <Text style={styles.iconButtonDarkText}>추가</Text>
-          </Pressable>
+          <View style={styles.headerActions}>
+            {hasMoreMaintenanceRecords ? (
+              <Pressable
+                accessibilityLabel={showAllMaintenanceRecords ? "기록장 접기" : "기록장 전체보기"}
+                accessibilityRole="button"
+                style={styles.viewAllButton}
+                onPress={() => setShowAllMaintenanceRecords((current) => !current)}
+              >
+                <Text style={styles.viewAllIcon}>{showAllMaintenanceRecords ? "⌃" : "☰"}</Text>
+                <Text style={styles.viewAllText}>{showAllMaintenanceRecords ? "접기" : "전체보기"}</Text>
+              </Pressable>
+            ) : null}
+            <Pressable style={styles.iconButtonDark} onPress={onAddMaintenance}>
+              <Text style={styles.iconButtonDarkText}>추가</Text>
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.listGap}>
-          {maintenanceRecords.map((record) => (
+          {visibleMaintenanceRecords.map((record) => (
             <RecordCard
               key={record.id}
               title={`${record.title} ${formatKm(record.odometerKm)}`}
@@ -3693,6 +3673,10 @@ function MaintenanceScheduleManager({
   onResetModelSchedules: () => void;
   themeStyles: ThemeStyles;
 }) {
+  const [showAllSchedules, setShowAllSchedules] = useState(false);
+  const hasMoreSchedules = schedules.length > COLLAPSED_LIST_LIMIT;
+  const visibleSchedules = showAllSchedules ? schedules : schedules.slice(0, COLLAPSED_LIST_LIMIT);
+
   return (
     <View style={styles.sectionBlock}>
       <View style={styles.sectionHeader}>
@@ -3700,6 +3684,17 @@ function MaintenanceScheduleManager({
           <Text style={[styles.sectionTitle, themeStyles.sectionTitle]}>전체 정비주기</Text>
         </View>
         <View style={styles.headerActions}>
+          {hasMoreSchedules ? (
+            <Pressable
+              accessibilityLabel={showAllSchedules ? "전체 정비주기 접기" : "전체 정비주기 전체보기"}
+              accessibilityRole="button"
+              style={styles.viewAllButton}
+              onPress={() => setShowAllSchedules((current) => !current)}
+            >
+              <Text style={styles.viewAllIcon}>{showAllSchedules ? "⌃" : "☰"}</Text>
+              <Text style={styles.viewAllText}>{showAllSchedules ? "접기" : "전체보기"}</Text>
+            </Pressable>
+          ) : null}
           <Pressable style={styles.iconButton} onPress={onResetModelSchedules}>
             <Text style={styles.iconButtonText}>모델 적용</Text>
           </Pressable>
@@ -3713,7 +3708,7 @@ function MaintenanceScheduleManager({
         확인하고 수정할 수 있습니다.
       </Text>
       <View style={styles.listGap}>
-        {schedules.map((schedule) => (
+        {visibleSchedules.map((schedule) => (
           <ScheduleCard
             key={schedule.id}
             schedule={schedule}
@@ -4161,6 +4156,7 @@ function SettingsScreen({
 function RecordCard({
   title,
   subtitle,
+  odometerText,
   shop,
   detail,
   amount,
@@ -4170,6 +4166,7 @@ function RecordCard({
 }: {
   title: string;
   subtitle: string;
+  odometerText?: string;
   shop?: string;
   detail: string;
   amount: string;
@@ -4188,6 +4185,9 @@ function RecordCard({
             <Text style={[styles.cardTitle, themeStyles.cardTitle, styles.recordTitleText]}>{title}</Text>
             <Text style={[styles.cardSubtitle, themeStyles.cardSubtitle, styles.recordSubtitleText]}>{subtitle}</Text>
           </View>
+          {odometerText ? (
+            <Text style={[styles.cardSubtitle, themeStyles.cardSubtitle, styles.recordOdometerText]}>{odometerText}</Text>
+          ) : null}
           {shop ? (
             <View style={styles.recordShopAmountRow}>
               <Text style={[styles.cardSubtitle, themeStyles.cardSubtitle, styles.recordShopText]}>{shop}</Text>
@@ -5139,25 +5139,32 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: "900"
   },
-  alertTitleRow: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    gap: 10,
-    justifyContent: "space-between",
-    width: "100%"
-  },
   alertTextBlock: {
-    flex: 1,
-    minWidth: 0
+    minWidth: 0,
+    width: "100%"
   },
   alertTitleText: {
     width: "100%"
+  },
+  alertMetaRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    justifyContent: "space-between",
+    marginTop: 6
+  },
+  alertMetaDueText: {
+    flexShrink: 0
   },
   alertReferenceText: {
     marginTop: 6
   },
   alertServiceText: {
-    marginTop: 0
+    flex: 1,
+    marginTop: 0,
+    minWidth: 120,
+    textAlign: "right"
   },
   cardSubtitle: {
     color: colors.muted,
@@ -5203,23 +5210,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "900"
   },
-  alertDeleteButton: {
-    alignItems: "center",
-    backgroundColor: "#FCEAE7",
-    borderColor: "#E2B0A7",
-    borderRadius: 8,
-    borderWidth: 1,
-    height: 44,
-    justifyContent: "center",
-    minWidth: 58,
-    paddingHorizontal: 12
-  },
-  alertDeleteButtonText: {
-    color: colors.red,
-    fontSize: 13,
-    fontWeight: "900",
-    lineHeight: 18
-  },
   statusOverdueButton: {
     backgroundColor: "#FCEAE7"
   },
@@ -5234,7 +5224,7 @@ const styles = StyleSheet.create({
   },
   alertActionRow: {
     alignItems: "center",
-    alignSelf: "flex-start",
+    alignSelf: "flex-end",
     flexShrink: 0,
     flexDirection: "row",
     flexWrap: "wrap",
@@ -5300,6 +5290,9 @@ const styles = StyleSheet.create({
   recordTitleText: {
     flex: 1,
     minWidth: 0
+  },
+  recordOdometerText: {
+    marginTop: 5
   },
   recordSubtitleText: {
     flexShrink: 0,
