@@ -101,6 +101,7 @@ type AppData = {
   fuelRecords: FuelRecord[];
   odometerRecords: OdometerRecord[];
   schedules: ScheduleItem[];
+  dismissedAlertKeys: string[];
   preferences: AppPreferences;
   handoverSession: HandoverSession | null;
 };
@@ -927,6 +928,7 @@ const emptyData: AppData = {
   fuelRecords: [],
   odometerRecords: [],
   schedules: [],
+  dismissedAlertKeys: [],
   preferences: {
     themeMode: "light",
     textSizeMode: "normal"
@@ -1494,16 +1496,21 @@ const sanitizeBikeProfile = (bike: BikeProfile): BikeProfile => ({
   createdAt: sanitizeIsoDate(bike.createdAt)
 });
 
+const stripScheduleMemoLabels = (memo: string) =>
+  memo.replace(
+    /(^|[.·]\s*)\s*(제조사 정기점검 항목|인터넷 정비표 기준|모델 정비표 기준|정비 참고 항목|정비 참고):\s*/g,
+    "$1"
+  );
+
 const sanitizeScheduleMemo = (memo: string) =>
   dedupeScheduleMemo(
-    memo
-      .replace(/제조사 매뉴얼에 맞게/g, "차량 상태와 보유 자료에 맞게")
-      .replace(/제조사 매뉴얼 기준으로/g, "사용자 기준으로")
-      .replace(/제조사 매뉴얼 기준/g, "사용자 기준")
-      .replace(/제조사 매뉴얼/g, "정비 참고자료")
-      .replace(/제조사 정기점검 항목:/g, "정비 참고 항목:")
-      .replace(/인터넷 정비표 기준:/g, "정비 참고:")
-      .replace(/모델 정비표 기준:/g, "정비 참고:")
+    stripScheduleMemoLabels(
+      memo
+        .replace(/제조사 매뉴얼에 맞게/g, "차량 상태와 보유 자료에 맞게")
+        .replace(/제조사 매뉴얼 기준으로/g, "사용자 기준으로")
+        .replace(/제조사 매뉴얼 기준/g, "사용자 기준")
+        .replace(/제조사 매뉴얼/g, "정비 참고자료")
+    )
   );
 
 const displayScheduleMemo = (memo: string) =>
@@ -1567,6 +1574,15 @@ const normalizeData = (
     source?.preferences?.textSizeMode === "small" || source?.preferences?.textSizeMode === "large"
       ? source.preferences.textSizeMode
       : "normal";
+  const normalizedSchedules = mergeDuplicateGeneratedSchedules(uniqueSchedules(schedules), bikes);
+  const scheduleIds = new Set(normalizedSchedules.map((schedule) => schedule.id));
+  const dismissedAlertKeys = Array.from(
+    new Set(
+      (source?.dismissedAlertKeys ?? []).filter(
+        (key): key is string => typeof key === "string" && scheduleIds.has(key.split(":")[0])
+      )
+    )
+  );
 
   return {
     version: 1,
@@ -1576,7 +1592,8 @@ const normalizeData = (
     maintenanceRecords: withBikeId(source?.maintenanceRecords ?? []).map(sanitizeMaintenanceRecord),
     fuelRecords: withBikeId(source?.fuelRecords ?? []).map(sanitizeFuelRecord),
     odometerRecords: withBikeId(source?.odometerRecords ?? []).map(sanitizeOdometerRecord),
-    schedules: mergeDuplicateGeneratedSchedules(uniqueSchedules(schedules), bikes),
+    schedules: normalizedSchedules,
+    dismissedAlertKeys,
     preferences: {
       themeMode,
       textSizeMode
@@ -1764,6 +1781,9 @@ const buildScheduleAlerts = (
       };
     })
     .sort((a, b) => a.dueInKm - b.dueInKm);
+
+const maintenanceAlertDismissKey = (alert: Pick<MaintenanceAlert, "id" | "nextDueKm" | "status">) =>
+  `${alert.id}:${alert.nextDueKm}:${alert.status}`;
 
 const textScaleFor = (mode: TextSizeMode) => {
   if (mode === "small") return 0.92;
@@ -2123,9 +2143,17 @@ export default function App() {
     activeData.fuelRecords
       .map((record) => record.station.trim())
       .find((station) => station && station !== "주유 기록") ?? "";
-  const alerts = useMemo(
+  const rawAlerts = useMemo(
     () => buildScheduleAlerts(activeData.schedules, activeData.maintenanceRecords, latestOdometer),
     [activeData.maintenanceRecords, activeData.schedules, latestOdometer]
+  );
+  const dismissedAlertKeySet = useMemo(
+    () => new Set(data.dismissedAlertKeys ?? []),
+    [data.dismissedAlertKeys]
+  );
+  const alerts = useMemo(
+    () => rawAlerts.filter((alert) => !dismissedAlertKeySet.has(maintenanceAlertDismissKey(alert))),
+    [dismissedAlertKeySet, rawAlerts]
   );
 
   const openMaintenanceModal = (template?: Pick<ScheduleItem, "title" | "category" | "memo"> | null) => {
@@ -2355,7 +2383,8 @@ export default function App() {
       ...current,
       schedules: current.schedules.map((item) =>
         item.id === schedule.id ? { ...schedule, bikeId: item.bikeId ?? activeBikeId } : item
-      )
+      ),
+      dismissedAlertKeys: (current.dismissedAlertKeys ?? []).filter((key) => !key.startsWith(`${schedule.id}:`))
     }));
     setScheduleOpen(false);
     setScheduleEditTarget(null);
@@ -2366,9 +2395,26 @@ export default function App() {
     confirmDestructive("정비주기 삭제", `${schedule.title} 주기를 삭제할까요?`, () => {
       setData((current) => ({
         ...current,
-        schedules: current.schedules.filter((item) => item.id !== schedule.id)
+        schedules: current.schedules.filter((item) => item.id !== schedule.id),
+        dismissedAlertKeys: (current.dismissedAlertKeys ?? []).filter((key) => !key.startsWith(`${schedule.id}:`))
       }));
     });
+  };
+
+  const dismissAlert = (alert: MaintenanceAlert) => {
+    const dismissKey = maintenanceAlertDismissKey(alert);
+    confirmAction(
+      "주의 항목 숨기기",
+      `${alert.title} 알림만 홈에서 숨길까요? 정비주기는 정비 탭에 그대로 남습니다.`,
+      "숨기기",
+      "primary",
+      () => {
+        setData((current) => ({
+          ...current,
+          dismissedAlertKeys: Array.from(new Set([...(current.dismissedAlertKeys ?? []), dismissKey]))
+        }));
+      }
+    );
   };
 
   const resetModelSchedules = () => {
@@ -2382,6 +2428,9 @@ export default function App() {
         setData((current) =>
           normalizeData({
             ...current,
+            dismissedAlertKeys: (current.dismissedAlertKeys ?? []).filter(
+              (key) => !key.startsWith(`schedule-${activeBike.id}-`)
+            ),
             schedules: [
               ...current.schedules.filter(
                 (schedule) => schedule.bikeId !== activeBike.id || !isGeneratedScheduleForBike(schedule, activeBike)
@@ -2716,7 +2765,7 @@ export default function App() {
             alerts={alerts}
             onAddMaintenance={openMaintenanceModal}
             onAddFuel={openFuelModal}
-            onDeleteSchedule={deleteSchedule}
+            onDismissAlert={dismissAlert}
             themeStyles={themeStyles}
           />
         )}
@@ -2776,6 +2825,7 @@ export default function App() {
         initialSchedule={maintenanceTemplate}
         initialRecord={maintenanceEditTarget}
         defaultShop={recentMaintenanceShop}
+        themeStyles={themeStyles}
         onClose={() => {
           setMaintenanceOpen(false);
           setMaintenanceTemplate(null);
@@ -2788,6 +2838,7 @@ export default function App() {
         latestOdometer={latestOdometer}
         initialRecord={fuelEditTarget}
         defaultStation={recentFuelStation}
+        themeStyles={themeStyles}
         onClose={() => {
           setFuelOpen(false);
           setFuelEditTarget(null);
@@ -2797,12 +2848,14 @@ export default function App() {
       <OdometerModal
         visible={odometerOpen}
         latestOdometer={latestOdometer}
+        themeStyles={themeStyles}
         onClose={() => setOdometerOpen(false)}
         onSubmit={addOdometer}
       />
       <ScheduleModal
         visible={scheduleOpen}
         initialSchedule={scheduleEditTarget}
+        themeStyles={themeStyles}
         onClose={() => {
           setScheduleOpen(false);
           setScheduleEditTarget(null);
@@ -3314,7 +3367,7 @@ function OverviewScreen({
   alerts,
   onAddMaintenance,
   onAddFuel,
-  onDeleteSchedule,
+  onDismissAlert,
   themeStyles
 }: {
   data: AppData;
@@ -3322,7 +3375,7 @@ function OverviewScreen({
   alerts: MaintenanceAlert[];
   onAddMaintenance: (template?: Pick<ScheduleItem, "title" | "category" | "memo"> | null) => void;
   onAddFuel: () => void;
-  onDeleteSchedule: (schedule: ScheduleItem) => void;
+  onDismissAlert: (alert: MaintenanceAlert) => void;
   themeStyles: ThemeStyles;
 }) {
   const totalMaintenance = data.maintenanceRecords.reduce((sum, record) => sum + record.costKrw, 0);
@@ -3386,7 +3439,7 @@ function OverviewScreen({
                 key={alert.id}
                 alert={alert}
                 onRecordMaintenance={() => onAddMaintenance(alert)}
-                onDeleteAlert={() => onDeleteSchedule(alert)}
+                onDeleteAlert={() => onDismissAlert(alert)}
                 onFindShop={() => setShopFinderAlert(alert)}
                 themeStyles={themeStyles}
               />
@@ -3448,6 +3501,7 @@ function OverviewScreen({
           bike={data.bike}
           schedule={shopFinderAlert}
           shops={partnerShops}
+          themeStyles={themeStyles}
           onClose={() => setShopFinderAlert(null)}
         />
       ) : null}
@@ -3720,32 +3774,34 @@ function PartnerShopFinderModal({
   bike,
   schedule,
   shops,
+  themeStyles,
   onClose
 }: {
   visible: boolean;
   bike: BikeProfile;
   schedule: ScheduleItem | null;
   shops: PartnerShop[];
+  themeStyles: ThemeStyles;
   onClose: () => void;
 }) {
   const matchedShops = shops.filter((shop) => shopMatchesContext(shop, bike, schedule));
   const searchLabel = schedule ? schedule.title : `${bike.manufacturer} ${bike.model}`;
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={styles.modalSafeArea}>
-        <View style={styles.modalHeader}>
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <SafeAreaView style={[styles.modalSafeArea, themeStyles.modalSafeArea]}>
+        <View style={[styles.modalHeader, themeStyles.modalHeader]}>
           <Pressable onPress={onClose} style={styles.modalTextButton}>
             <Text style={styles.modalTextButtonLabel}>닫기</Text>
           </Pressable>
-          <Text style={styles.modalTitle}>협력 정비소</Text>
+          <Text style={[styles.modalTitle, themeStyles.modalTitle]}>협력 정비소</Text>
           <View style={styles.modalTextButton} />
         </View>
         <ScrollView contentContainerStyle={styles.formContent}>
-          <View style={styles.partnerFinderHero}>
+          <View style={[styles.partnerFinderHero, themeStyles.recordCard]}>
             <Text style={styles.cardEyebrow}>정비 항목</Text>
-            <Text style={styles.cardTitle}>{searchLabel}</Text>
-            <Text style={styles.cardDetail}>
+            <Text style={[styles.cardTitle, themeStyles.cardTitle]}>{searchLabel}</Text>
+            <Text style={[styles.cardDetail, themeStyles.cardDetail]}>
               {bike.manufacturer} {bike.model}
             </Text>
             <Pressable style={styles.secondaryButtonWide} onPress={() => openExternalUrl(mapSearchUrl(bike, schedule))}>
@@ -3755,13 +3811,13 @@ function PartnerShopFinderModal({
 
           <View style={styles.sectionBlock}>
             <Text style={styles.sectionEyebrow}>협력 업체</Text>
-            <Text style={styles.sectionTitle}>추천 정비소</Text>
+            <Text style={[styles.sectionTitle, themeStyles.sectionTitle]}>추천 정비소</Text>
             <View style={styles.listGap}>
               {matchedShops.map((shop) => (
-                <PartnerShopCard key={shop.id} shop={shop} />
+                <PartnerShopCard key={shop.id} shop={shop} themeStyles={themeStyles} />
               ))}
               {!matchedShops.length ? (
-                <EmptyState title="등록된 협력 정비소가 없습니다" copy="지도 검색으로 근처 정비소를 확인하세요." />
+                <EmptyState title="등록된 협력 정비소가 없습니다" copy="지도 검색으로 근처 정비소를 확인하세요." themeStyles={themeStyles} />
               ) : null}
             </View>
           </View>
@@ -3772,28 +3828,30 @@ function PartnerShopFinderModal({
 }
 
 function PartnerShopCard({
-  shop
+  shop,
+  themeStyles
 }: {
   shop: PartnerShop;
+  themeStyles: ThemeStyles;
 }) {
   const phoneUrl = `tel:${shop.phone.replace(/[^0-9+]/g, "")}`;
   const directionsUrl = shop.mapUrl || mapSearchByTextUrl(shop.address);
 
   return (
-    <View style={styles.partnerShopCard}>
+    <View style={[styles.partnerShopCard, themeStyles.recordCard]}>
       <View style={styles.rowBetween}>
         <View style={styles.flex}>
-          <Text style={styles.cardTitle}>{shop.name}</Text>
-          <Text style={styles.cardSubtitle}>
+          <Text style={[styles.cardTitle, themeStyles.cardTitle]}>{shop.name}</Text>
+          <Text style={[styles.cardSubtitle, themeStyles.cardSubtitle]}>
             {shop.region} · {shop.phone}
           </Text>
         </View>
-        <Text style={styles.statusPill}>협력</Text>
+        <Text style={[styles.statusPill, themeStyles.statusPill]}>협력</Text>
       </View>
-      <Text style={styles.cardDetail}>{shop.address}</Text>
+      <Text style={[styles.cardDetail, themeStyles.cardDetail]}>{shop.address}</Text>
       <View style={styles.partnerTagRow}>
         {shop.specialties.slice(0, 4).map((specialty) => (
-          <Text key={specialty} style={styles.partnerTag}>
+          <Text key={specialty} style={[styles.partnerTag, themeStyles.statusPill]}>
             {specialty}
           </Text>
         ))}
@@ -4183,6 +4241,7 @@ function MaintenanceModal({
   initialSchedule,
   initialRecord,
   defaultShop,
+  themeStyles,
   onClose,
   onSubmit
 }: {
@@ -4191,6 +4250,7 @@ function MaintenanceModal({
   initialSchedule?: Pick<ScheduleItem, "title" | "category" | "memo"> | null;
   initialRecord?: MaintenanceRecord | null;
   defaultShop: string;
+  themeStyles: ThemeStyles;
   onClose: () => void;
   onSubmit: (record: MaintenanceRecord) => void;
 }) {
@@ -4241,16 +4301,16 @@ function MaintenanceModal({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <FormScaffold title={initialRecord ? "정비 기록 수정" : "정비 기록 추가"} onClose={onClose} onSubmit={submit}>
-        <TextInput value={form.title} onChangeText={(v) => update("title", v)} placeholder="정비명" style={styles.input} placeholderTextColor="#8792A0" />
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <FormScaffold title={initialRecord ? "정비 기록 수정" : "정비 기록 추가"} onClose={onClose} onSubmit={submit} themeStyles={themeStyles}>
+        <TextInput value={form.title} onChangeText={(v) => update("title", v)} placeholder="정비명" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
         <View style={styles.twoColumn}>
-          <TextInput value={form.date} onChangeText={(v) => update("date", v)} placeholder="날짜" style={[styles.input, styles.flex]} placeholderTextColor="#8792A0" />
-          <TextInput value={form.odometerKm} onChangeText={(v) => update("odometerKm", v)} placeholder="주행거리 km" keyboardType="number-pad" style={[styles.input, styles.flex]} placeholderTextColor="#8792A0" />
+          <TextInput value={form.date} onChangeText={(v) => update("date", v)} placeholder="날짜" style={[styles.input, themeStyles.input, styles.flex]} placeholderTextColor="#8792A0" />
+          <TextInput value={form.odometerKm} onChangeText={(v) => update("odometerKm", v)} placeholder="주행거리 km" keyboardType="number-pad" style={[styles.input, themeStyles.input, styles.flex]} placeholderTextColor="#8792A0" />
         </View>
-        <TextInput value={form.shop} onChangeText={(v) => update("shop", v)} placeholder="정비소" style={styles.input} placeholderTextColor="#8792A0" />
-        <TextInput value={form.costKrw} onChangeText={(v) => update("costKrw", v)} placeholder="비용" keyboardType="number-pad" style={styles.input} placeholderTextColor="#8792A0" />
-        <TextInput value={form.memo} onChangeText={(v) => update("memo", v)} placeholder="메모" multiline style={[styles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
+        <TextInput value={form.shop} onChangeText={(v) => update("shop", v)} placeholder="정비소" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
+        <TextInput value={form.costKrw} onChangeText={(v) => update("costKrw", v)} placeholder="비용" keyboardType="number-pad" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
+        <TextInput value={form.memo} onChangeText={(v) => update("memo", v)} placeholder="메모" multiline style={[styles.input, themeStyles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
       </FormScaffold>
     </Modal>
   );
@@ -4261,6 +4321,7 @@ function FuelModal({
   latestOdometer,
   initialRecord,
   defaultStation,
+  themeStyles,
   onClose,
   onSubmit
 }: {
@@ -4268,6 +4329,7 @@ function FuelModal({
   latestOdometer: number;
   initialRecord?: FuelRecord | null;
   defaultStation: string;
+  themeStyles: ThemeStyles;
   onClose: () => void;
   onSubmit: (record: FuelRecord) => void;
 }) {
@@ -4314,18 +4376,18 @@ function FuelModal({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <FormScaffold title={initialRecord ? "주유 기록 수정" : "주유 기록 추가"} onClose={onClose} onSubmit={submit}>
-        <TextInput value={form.station} onChangeText={(v) => update("station", v)} placeholder="주유소명 선택" style={styles.input} placeholderTextColor="#8792A0" />
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <FormScaffold title={initialRecord ? "주유 기록 수정" : "주유 기록 추가"} onClose={onClose} onSubmit={submit} themeStyles={themeStyles}>
+        <TextInput value={form.station} onChangeText={(v) => update("station", v)} placeholder="주유소명 선택" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
         <View style={styles.twoColumn}>
-          <TextInput value={form.date} onChangeText={(v) => update("date", v)} placeholder="날짜" style={[styles.input, styles.flex]} placeholderTextColor="#8792A0" />
-          <TextInput value={form.odometerKm} onChangeText={(v) => update("odometerKm", v)} placeholder="주행거리 km" keyboardType="number-pad" style={[styles.input, styles.flex]} placeholderTextColor="#8792A0" />
+          <TextInput value={form.date} onChangeText={(v) => update("date", v)} placeholder="날짜" style={[styles.input, themeStyles.input, styles.flex]} placeholderTextColor="#8792A0" />
+          <TextInput value={form.odometerKm} onChangeText={(v) => update("odometerKm", v)} placeholder="주행거리 km" keyboardType="number-pad" style={[styles.input, themeStyles.input, styles.flex]} placeholderTextColor="#8792A0" />
         </View>
         <View style={styles.twoColumn}>
-          <TextInput value={form.liters} onChangeText={(v) => update("liters", v)} placeholder="리터" keyboardType="decimal-pad" style={[styles.input, styles.flex]} placeholderTextColor="#8792A0" />
-          <TextInput value={form.costKrw} onChangeText={(v) => update("costKrw", v)} placeholder="비용" keyboardType="number-pad" style={[styles.input, styles.flex]} placeholderTextColor="#8792A0" />
+          <TextInput value={form.liters} onChangeText={(v) => update("liters", v)} placeholder="리터" keyboardType="decimal-pad" style={[styles.input, themeStyles.input, styles.flex]} placeholderTextColor="#8792A0" />
+          <TextInput value={form.costKrw} onChangeText={(v) => update("costKrw", v)} placeholder="비용" keyboardType="number-pad" style={[styles.input, themeStyles.input, styles.flex]} placeholderTextColor="#8792A0" />
         </View>
-        <TextInput value={form.memo} onChangeText={(v) => update("memo", v)} placeholder="메모 선택" multiline style={[styles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
+        <TextInput value={form.memo} onChangeText={(v) => update("memo", v)} placeholder="메모 선택" multiline style={[styles.input, themeStyles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
       </FormScaffold>
     </Modal>
   );
@@ -4334,11 +4396,13 @@ function FuelModal({
 function OdometerModal({
   visible,
   latestOdometer,
+  themeStyles,
   onClose,
   onSubmit
 }: {
   visible: boolean;
   latestOdometer: number;
+  themeStyles: ThemeStyles;
   onClose: () => void;
   onSubmit: (record: OdometerRecord) => void;
 }) {
@@ -4367,15 +4431,15 @@ function OdometerModal({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <FormScaffold title="현재 키로수 입력" onClose={onClose} onSubmit={submit}>
-        <View style={styles.infoPanel}>
-          <Text style={styles.cardTitle}>30일 알림용 주행거리 확인</Text>
-          <Text style={styles.cardDetail}>정비나 주유 기록이 없어도 이 값으로 다음 정비 알림을 다시 계산합니다.</Text>
-          <Text style={styles.mutedStrong}>마지막 기록 {formatKm(latestOdometer)}</Text>
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <FormScaffold title="현재 키로수 입력" onClose={onClose} onSubmit={submit} themeStyles={themeStyles}>
+        <View style={[styles.infoPanel, themeStyles.infoPanel]}>
+          <Text style={[styles.cardTitle, themeStyles.cardTitle]}>30일 알림용 주행거리 확인</Text>
+          <Text style={[styles.cardDetail, themeStyles.cardDetail]}>정비나 주유 기록이 없어도 이 값으로 다음 정비 알림을 다시 계산합니다.</Text>
+          <Text style={[styles.mutedStrong, themeStyles.mutedStrong]}>마지막 기록 {formatKm(latestOdometer)}</Text>
         </View>
-        <TextInput value={odometerKm} onChangeText={setOdometerKm} placeholder="현재 주행거리 km" keyboardType="number-pad" style={styles.input} placeholderTextColor="#8792A0" />
-        <TextInput value={memo} onChangeText={setMemo} placeholder="메모" multiline style={[styles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
+        <TextInput value={odometerKm} onChangeText={setOdometerKm} placeholder="현재 주행거리 km" keyboardType="number-pad" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
+        <TextInput value={memo} onChangeText={setMemo} placeholder="메모" multiline style={[styles.input, themeStyles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
       </FormScaffold>
     </Modal>
   );
@@ -4384,11 +4448,13 @@ function OdometerModal({
 function ScheduleModal({
   visible,
   initialSchedule,
+  themeStyles,
   onClose,
   onSubmit
 }: {
   visible: boolean;
   initialSchedule?: ScheduleItem | null;
+  themeStyles: ThemeStyles;
   onClose: () => void;
   onSubmit: (schedule: ScheduleItem) => void;
 }) {
@@ -4433,22 +4499,22 @@ function ScheduleModal({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <FormScaffold title={initialSchedule ? "정비주기 수정" : "정비주기 추가"} onClose={onClose} onSubmit={submit}>
-        <TextInput value={form.title} onChangeText={(v) => update("title", v)} placeholder="항목명" style={styles.input} placeholderTextColor="#8792A0" />
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <FormScaffold title={initialSchedule ? "정비주기 수정" : "정비주기 추가"} onClose={onClose} onSubmit={submit} themeStyles={themeStyles}>
+        <TextInput value={form.title} onChangeText={(v) => update("title", v)} placeholder="항목명" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
           {categories.map((category) => (
             <Pressable
               key={category}
-              style={[styles.chip, form.category === category && styles.activeChip]}
+              style={[styles.chip, themeStyles.chip, form.category === category && styles.activeChip]}
               onPress={() => update("category", category)}
             >
-              <Text style={[styles.chipText, form.category === category && styles.activeChipText]}>{category}</Text>
+              <Text style={[styles.chipText, themeStyles.chipText, form.category === category && styles.activeChipText]}>{category}</Text>
             </Pressable>
           ))}
         </ScrollView>
-        <TextInput value={form.intervalKm} onChangeText={(v) => update("intervalKm", v)} placeholder="주기 km" keyboardType="number-pad" style={styles.input} placeholderTextColor="#8792A0" />
-        <TextInput value={form.memo} onChangeText={(v) => update("memo", v)} placeholder="메모" multiline style={[styles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
+        <TextInput value={form.intervalKm} onChangeText={(v) => update("intervalKm", v)} placeholder="주기 km" keyboardType="number-pad" style={[styles.input, themeStyles.input]} placeholderTextColor="#8792A0" />
+        <TextInput value={form.memo} onChangeText={(v) => update("memo", v)} placeholder="메모" multiline style={[styles.input, themeStyles.input, styles.memoInput]} placeholderTextColor="#8792A0" />
       </FormScaffold>
     </Modal>
   );
@@ -4458,21 +4524,23 @@ function FormScaffold({
   title,
   children,
   onClose,
-  onSubmit
+  onSubmit,
+  themeStyles
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
   onSubmit: () => void;
+  themeStyles: ThemeStyles;
 }) {
   return (
-    <SafeAreaView style={styles.modalSafeArea}>
+    <SafeAreaView style={[styles.modalSafeArea, themeStyles.modalSafeArea]}>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.flex}>
-        <View style={styles.modalHeader}>
+        <View style={[styles.modalHeader, themeStyles.modalHeader]}>
           <Pressable onPress={onClose} style={styles.modalTextButton}>
             <Text style={styles.modalTextButtonLabel}>닫기</Text>
           </Pressable>
-          <Text style={styles.modalTitle}>{title}</Text>
+          <Text style={[styles.modalTitle, themeStyles.modalTitle]}>{title}</Text>
           <Pressable onPress={onSubmit} style={styles.modalTextButton}>
             <Text style={styles.modalTextButtonLabel}>저장</Text>
           </Pressable>
